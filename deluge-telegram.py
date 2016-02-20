@@ -9,28 +9,23 @@ import json
 from optparse import OptionParser
 from telepot.delegate import per_chat_id, create_open
 
-reload(sys)
-sys.setdefaultencoding('utf-8')
 
+# Logging configuration constants
 LOG_FILE = '/var/log/deluge-telegram.log'
+LOG_FORMAT = '[%(levelname)-8s] %(asctime)-15s %(message)s'
+
+# Bot configuration constants
 CONFIG_FILE = '/etc/deluge-telegram/setting.json'
 
-################################################################################
-# 
-# DelugeAgent
-# 
-#  apt-get install deluge-console (for debian, ubuntu)
-# 
+
 class DelugeAgent:
+    """ Deluge Agent
+
+        Torrent management functions for Deluge daemon
+    """
     def deluge_cmd(self, command, target=""):
         logger.info('Command {} launched with target {}...'.format(command, target))
         return os.popen("deluge-console {} {}".format(command, target)).read()
-
-    def downloadFromMagnet(self, magnet):
-        return self.deluge_cmd('add', magnet)
-
-    def getCurrentList(self):
-        return self.deluge_cmd("info")
 
     def filterCompletedList(self, result, active_only=False):
         outString = ''
@@ -83,6 +78,12 @@ class DelugeAgent:
 
         return outString, entry_dict, completed_dict
 
+    def list_items(self):
+        return self.deluge_cmd("info")
+
+    def add_item(self, link):
+        return self.deluge_cmd('add', link)
+
     def pause_item(self, item_id):
         return self.deluge_cmd('pause', item_id)
 
@@ -91,53 +92,6 @@ class DelugeAgent:
 
     def remove_item(self, item_id):
         return self.deluge_cmd('del', item_id)
-
-
-################################################################################
-# 
-# TransmissionAgent
-# 
-#  apt-get install transmission-cli (for debian, ubuntu)
-# 
-class TransmissionAgent:
-    def __init__(self):
-        transmissionCmd = 'transmission-remote '
-        if TRANSMISSION_USER:
-            transmissionCmd = transmissionCmd + '-n ' + TRANSMISSION_USER
-            if TRANSMISSION_PASSWORD:
-                transmissionCmd = transmissionCmd + ':' + TRANSMISSION_PASSWORD
-            transmissionCmd = transmissionCmd + ' '
-        if TRANSMISSION_PORT:
-            transmissionCmd = transmissionCmd + '-p ' + TRANSMISSION_PORT + ' '
-        self.transmissionCmd = transmissionCmd
-
-    def downloadFromMagnet(self, magnet):
-        os.system(self.transmissionCmd + '-a ' + magnet)
-
-    def getCurrentList(self):
-        return os.popen(self.transmissionCmd + '-l').read()
-
-    def filterCompletedList(self, result):
-        outString = ''
-        resultlist = result.split('\n')
-        titlelist = resultlist[0]
-        resultlist = resultlist[1:-2]
-        completedlist = []
-        for entry in resultlist:
-            title = entry[titlelist.index('Name'):].strip()
-            status = entry[titlelist.index('Status'):titlelist.index('Name')-1].strip()
-            progress = entry[titlelist.index('Done'):titlelist.index('Done')+4].strip()
-            if progress == '100%':
-                titleid = entry[titlelist.index('ID'):titlelist.index('Done')-1].strip()
-                completedlist.append(titleid)
-            outString += '이름: '+title+'\n' + '상태:' + status + '\n'
-            if progress:
-                outString += '진행율:' + progress + '\n'
-            outString += '\n'
-        return (outString, completedlist)
-
-    def removeFromList(self, id):
-        os.system(self.transmissionCmd + '-t '+ id + ' -r')
 
 
 ################################################################################
@@ -170,17 +124,16 @@ class Torrenter(telepot.helper.ChatHandler):
 
     def __init__(self, seed_tuple, timeout):
         super(Torrenter, self).__init__(seed_tuple, timeout)
-        self.agent = self.createAgent(AGENT_TYPE)
+        self.agent = self.create_agent(AGENT_TYPE)
 
-    def createAgent(self, agentType):
-        logger.info("Started with agent of type '{}'".format(agentType))
+    @staticmethod
+    def create_agent(agent_type):
+        logger.info("Started with agent of type '{}'".format(agent_type))
 
-        if agentType == 'deluge':
+        if agent_type == 'deluge':
             return DelugeAgent()
-        if agentType == 'transmission':
-            return TransmissionAgent()
-        raise('invalid torrent client')
-        return None
+
+        raise "Invalid agent type {}".format(agent_type)
 
     def open(self, initial_msg, seed):
         content_type, chat_type, chat_id = telepot.glance2(initial_msg)
@@ -222,15 +175,14 @@ class Torrenter(telepot.helper.ChatHandler):
         self.mode = ''
         self.sender.sendMessage('Link received, please wait...')
 
-        response = self.agent.downloadFromMagnet(link)
+        response = self.agent.add_item(link)
 
         self.main_menu(response)
 
     def tor_show_list(self, active_only):
         self.mode = ''
-        #self.sender.sendMessage('Checking list...')
 
-        result = self.agent.getCurrentList()
+        result = self.agent.list_items()
         if not result:
             logger.info('No results...')
             self.sender.sendMessage('Nothing found.')
@@ -241,7 +193,6 @@ class Torrenter(telepot.helper.ChatHandler):
 
         self.entry_set = entry_set
         self.completed_set = completed_set
-
 
         action_list = []
 
@@ -399,14 +350,14 @@ class Torrenter(telepot.helper.ChatHandler):
     def on_message(self, msg):
         content_type, chat_type, chat_id = telepot.glance2(msg)
 
-        #Check ID
-        if not chat_id in VALID_USERS:
+        # Check ID
+        if chat_id not in VALID_USERS:
             logger.warning("Permission Denied (user:{}) (chat:{})".format(chat_id, chat_type))
             self.sender.sendMessage(self.ERROR_PERMISSION_DENIED)
             return
 
         if content_type is 'text':
-            cmd = unicode(msg['text'])
+            cmd = msg['text']
             logger.info("Message received (user:{}) (chat:{}) (type:{}) (text:{})".format(chat_id, chat_type, content_type, cmd))
             self.handle_command(cmd)
             return
@@ -420,43 +371,36 @@ class Torrenter(telepot.helper.ChatHandler):
         pass
 
 
-def setup_logging(loglevel, printtostdout):
+def setup_logging(log_level, printtostdout):
     global logger
 
-    FORMAT = '[%(levelname)-8s] %(asctime)-15s %(message)s'
-    logging.basicConfig(filename=LOG_FILE, format=FORMAT)
+    logging.basicConfig(filename=LOG_FILE, format=LOG_FORMAT)
 
     logger = logging.getLogger(__name__)
-    logger.setLevel(loglevel)
+    logger.setLevel(log_level)
 
     if printtostdout:
         soh = logging.StreamHandler(sys.stdout)
-        soh.setLevel(loglevel)
+        soh.setLevel(log_level)
         filelog = logging.getLogger()
         filelog.addHandler(soh)
 
 
-def parseConfig(filename):
+def parse_config(filename):
     f = open(filename, 'r')
     js = json.loads(f.read())
     f.close()
     return js
 
 
-def getConfig(config):
+def setup(config):
     global TOKEN
     global AGENT_TYPE
     global VALID_USERS
+
     TOKEN = config['common']['token']
     AGENT_TYPE = config['common']['agent_type']
     VALID_USERS = config['common']['valid_users']
-    if AGENT_TYPE == 'transmission':
-        global transmission_user
-        global transmission_password
-        global transmission_port
-        TRANSMISSION_USER = config['for_transmission']['transmission_user']
-        TRANSMISSION_PASSWORD = config['for_transmission']['transmission_password']
-        TRANSMISSION_PORT = config['for_transmission']['transmission_port']
 
 
 parser = OptionParser('Test logging')
@@ -478,12 +422,12 @@ setup_logging(loglevel, options.printtostdout)
 
 logger.info('Starting up...')
 
-config = parseConfig(CONFIG_FILE)
-if not bool(config):
+config_json = parse_config(CONFIG_FILE)
+if not bool(config_json):
     logger.error("Err: Setting file is not found")
     exit()
 
-getConfig(config)
+setup(config_json)
 
 bot = telepot.DelegatorBot(TOKEN, [
     (per_chat_id(), create_open(Torrenter, timeout=120)),
