@@ -1,15 +1,19 @@
-# Deluge Telegram
+# Telegram Torrent
 
-A simple Telegram Bot (https://telegram.org/blog/bot-revolution) written in Python that allows remote control over a locally installed Deluge server (http://deluge-torrent.org)
+A simple Telegram Bot (https://telegram.org/blog/bot-revolution) written in Python that allows remote control over a 
+locally installed BitTorrent client
 
 
 Inspired by telegram-control-torrent (https://github.com/seungjuchoi/telegram-control-deluge)
+
+## Supported BitTorrent client
+-  Deluge (http://deluge-torrent.org)
 
 ## Dependencies
 - Telepot (https://pypi.python.org/pypi/telepot)
 
 ## Configuration
-The setting.json file contains all the required settings
+The default.conf file contains all the required settings
 
 - common
   - **token**: The Bot API token supplied by the BotFather after creating your Bot
