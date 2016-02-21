@@ -1,106 +1,29 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python
 #-*- coding: utf-8 -*-
 
 import sys
-import os
 import logging
-import telepot
 import json
+import telepot
+
 from optparse import OptionParser
 from telepot.delegate import per_chat_id, create_open
-
+from agents import TestAgent, DelugeAgent
 
 # Logging configuration constants
 LOG_FILE = '/var/log/deluge-telegram.log'
 LOG_FORMAT = '[%(levelname)-8s] %(asctime)-15s %(message)s'
 
 # Bot configuration constants
-CONFIG_FILE = '/etc/deluge-telegram/setting.json'
+CONFIG_FILE = '/etc/deluge-telegram/default.conf'
 
 
-class DelugeAgent:
-    """ Deluge Agent
-
-        Torrent management functions for Deluge daemon
-    """
-    def deluge_cmd(self, command, target=""):
-        logger.info('Command {} launched with target {}...'.format(command, target))
-        return os.popen("deluge-console {} {}".format(command, target)).read()
-
-    def filterCompletedList(self, result, active_only=False):
-        outString = ''
-        resultlist = result.split('\n \n')
-
-        entry_dict = {}
-        completed_dict = {}
-
-        for entry in resultlist:
-            title = entry[entry.index('Name:')+6:entry.index('ID:')-1]
-
-            logger.debug('Entry title: {}'.format(title))
-
-            if 'State: Paused' in entry:
-                status = 'Paused'
-            elif 'State: Downloading' in entry:
-                status = 'Downloading'
-            elif 'State: Seeding' in entry:
-                status = 'Seeding'
-            else:
-                status = 'Unknown'
-
-            entry_id = entry[entry.index('ID:')+4:entry.index('State:')-1]
-
-            progress = ''
-            ratio = ''
-            if status == 'Seeding' or status == 'Paused':
-                completed_dict[title] = entry_id
-                ratio = entry[entry.index('Ratio:')+7:entry.index('Ratio:')+12]
-            elif status == 'Downloading':
-                progress = entry[entry.index('Progress:')+10:entry.index('% [')+1]
-
-            if status != 'Paused':
-                entry_dict[title] = entry_id
-
-            if active_only and status not in ['Seeding', 'Downloading']:
-                logger.debug('Entry skipped because of Active filter')
-            else:
-                outString += 'Title: '+title+'\n' + 'Status: ' + status
-
-                if progress:
-                    outString += ' ({}%)\n'.format(progress)
-                elif ratio:
-                    outString += ' ({})\n'.format(ratio)
-
-                outString += '\n'
-
-        logger.debug("Active Entry set: {}".format(entry_dict))
-        logger.debug("Complete Entry set: {}".format(completed_dict))
-
-        return outString, entry_dict, completed_dict
-
-    def list_items(self):
-        return self.deluge_cmd("info")
-
-    def add_item(self, link):
-        return self.deluge_cmd('add', link)
-
-    def pause_item(self, item_id):
-        return self.deluge_cmd('pause', item_id)
-
-    def resume_item(self, item_id):
-        return self.deluge_cmd('resume', item_id)
-
-    def remove_item(self, item_id):
-        return self.deluge_cmd('del', item_id)
-
-
-################################################################################
-#
-# Main Torrenter
-#
-#  Messange Handler for Telegram Bot
-#
 class Torrenter(telepot.helper.ChatHandler):
+    """
+        Main Torrenter class
+
+        Message handler for Telegram Bot
+    """
     YES = 'OK'
     NO = 'NO'
     MENU0 = 'Home'
@@ -112,14 +35,13 @@ class Torrenter(telepot.helper.ChatHandler):
     MENU7 = 'Remove item'
     MENU8 = 'Resume item'
 
-    MENU2_0 = 'Show all (Active and Inactive)'
-    MENU2_1 = 'Clear Completed'
-
     GREETING = "How can I help you?"
     ERROR_PERMISSION_DENIED = "Permission denied"
 
     mode = ''
+
     entry_set = {}
+    active_set = {}
     completed_set = {}
 
     def __init__(self, seed_tuple, timeout):
@@ -132,8 +54,40 @@ class Torrenter(telepot.helper.ChatHandler):
 
         if agent_type == 'deluge':
             return DelugeAgent()
+        elif agent_type == 'test':
+            return TestAgent()
 
         raise "Invalid agent type {}".format(agent_type)
+
+    @staticmethod
+    def filter_list(item_list):
+        logger.info('Filtering list...')
+
+        active_items = {k: v for k, v in item_list.items() if v['status'] in ['Downloading', 'Seeding']}
+        completed_items = {k: v for k, v in item_list.items() if v['status'] in ['Seeding', 'Paused']}
+
+        logger.debug('Active set: {}'.format(active_items))
+        logger.debug('Completed set: {}'.format(completed_items))
+
+        return active_items, completed_items
+
+    @staticmethod
+    def prepare_message(item_list):
+        ret = ''
+
+        for item in item_list:
+            logger.debug('Item: {}'.format(item))
+
+            ret += 'Title: {title}\nStatus: {status}'.format(**item)
+
+            if item['status'] == 'Downloading':
+                ret += ' ({progress}%)\n'.format(**item)
+            else:
+                ret += ' ({ratio})\n'.format(**item)
+
+            ret += '\n'
+
+        return ret
 
     def open(self, initial_msg, seed):
         content_type, chat_type, chat_id = telepot.glance2(initial_msg)
@@ -149,9 +103,9 @@ class Torrenter(telepot.helper.ChatHandler):
         show_keyboard = {'keyboard': keyboard_items, 'one_time_keyboard': True, 'resize_keyboard': True}
         self.sender.sendMessage(message, reply_markup=show_keyboard)
 
-    def menu(self):
+    def menu(self, message=GREETING):
         self.mode = ''
-        self.message_with_keyboard(self.GREETING, [self.MENU4, self.MENU2])
+        self.message_with_keyboard(message, [self.MENU4, self.MENU2])
 
     def main_menu(self, message):
         self.message_with_keyboard(message, [self.MENU2, self.MENU0])
@@ -164,8 +118,14 @@ class Torrenter(telepot.helper.ChatHandler):
         self.message_with_keyboard(message, [self.MENU0])
 
     def message_with_set(self, message, answer_set):
-        answer_set.append(self.MENU0)
-        self.message_with_keyboard(message, answer_set)
+        item_list = []
+
+        for k, v in answer_set.items():
+            item_list.append(v['title'])
+
+        item_list.append(self.MENU0)
+
+        self.message_with_keyboard(message, item_list)
 
     def tor_ask_for_link(self):
         self.mode = self.MENU4
@@ -182,43 +142,41 @@ class Torrenter(telepot.helper.ChatHandler):
     def tor_show_list(self, active_only):
         self.mode = ''
 
-        result = self.agent.list_items()
-        if not result:
+        self.entry_set = self.agent.list_items()
+        if not self.entry_set:
             logger.info('No results...')
-            self.sender.sendMessage('Nothing found.')
-            self.menu()
+            self.menu('Nothing found. Try to add something first')
             return
 
-        outString, entry_set, completed_set = self.agent.filterCompletedList(result, active_only)
+        self.active_set, self.completed_set = self.filter_list(self.entry_set)
 
-        self.entry_set = entry_set
-        self.completed_set = completed_set
+        if active_only:
+            out_string = self.prepare_message(self.active_set.values())
+        else:
+            out_string = self.prepare_message(self.entry_set.values())
+
+        logger.debug('Result message: {}'.format(out_string))
 
         action_list = []
 
         if active_only:
             action_list.append(self.MENU5)
 
-        if len(self.entry_set) > 0:
+        if len(self.active_set) > 0:
             action_list.append(self.MENU6)
 
         if not active_only and len(self.completed_set) > 0:
             action_list.append(self.MENU8)
             action_list.append(self.MENU7)
 
-        if not outString == '':
+        action_list.append(self.MENU0)
+
+        if len(out_string) > 0:
             logger.debug('Sending active item list...')
-            self.message_with_set(outString, action_list)
+            self.message_with_keyboard(out_string, action_list)
         else:
             logger.debug('No active items found.')
-            self.message_with_set('No active items found.', action_list)
-
-        # if not active_only:
-        #     self.mode = self.MENU2_1
-        #     self.yes_or_no('Would you like to remove the completed items from the list?')
-        # else:
-        #     self.mode = self.MENU2_0
-        #     self.yes_or_no('Would you like to see all items, even the inactive ones?')
+            self.message_with_keyboard('No active items found.', action_list)
 
     def show_full_list(self, command):
         if command == self.YES:
@@ -232,7 +190,7 @@ class Torrenter(telepot.helper.ChatHandler):
             logger.debug("Sending list of active items")
 
             self.mode = self.MENU6
-            self.message_with_set('Which item do you want to pause?', self.entry_set.keys())
+            self.message_with_set('Which item do you want to pause?', self.active_set)
         else:
             logger.debug("Active items list is empty.")
             self.main_menu('All items are already paused')
@@ -242,7 +200,7 @@ class Torrenter(telepot.helper.ChatHandler):
         if len(self.completed_set) > 0:
             logger.debug("Sending list of completed items")
             self.mode = self.MENU8
-            self.message_with_set('Which item do you want to resume?', self.completed_set.keys())
+            self.message_with_set('Which item do you want to resume?', self.completed_set)
         else:
             logger.debug("Completed items list is empty.")
             self.main_menu('No item to resume')
@@ -252,16 +210,28 @@ class Torrenter(telepot.helper.ChatHandler):
         if len(self.completed_set) > 0:
             logger.debug("Sending list of completed items")
             self.mode = self.MENU7
-            self.message_with_set('Which item do you want to remove?', self.completed_set.keys())
+            self.message_with_set('Which item do you want to remove?', self.completed_set)
         else:
             logger.debug("Completed items list is empty.")
             self.main_menu('No item to remove')
 
+    @staticmethod
+    def find_key_by_title(item_set, title):
+        found_key = None
+
+        for k, entry in item_set.items():
+            if entry['title'] == title:
+                found_key = k
+
+        return found_key
+
     def tor_pause_item(self, command):
         self.mode = ''
 
-        if command in self.entry_set:
-            res = self.agent.pause_item(self.entry_set[command])
+        key_to_pause = self.find_key_by_title(self.active_set, command)
+
+        if key_to_pause is not None:
+            res = self.agent.pause_item(key_to_pause)
             logger.info("Command result: {}".format(res))
             self.main_menu('Ok')
         else:
@@ -271,8 +241,10 @@ class Torrenter(telepot.helper.ChatHandler):
     def tor_resume_item(self, command):
         self.mode = ''
 
-        if command in self.completed_set:
-            res = self.agent.resume_item(self.completed_set[command])
+        key_to_resume = self.find_key_by_title(self.completed_set, command)
+
+        if key_to_resume is not None:
+            res = self.agent.resume_item(key_to_resume)
             logger.info("Command result: {}".format(res))
             self.main_menu('Ok')
         else:
@@ -281,25 +253,14 @@ class Torrenter(telepot.helper.ChatHandler):
     def tor_remove_item(self, command):
         self.mode = ''
 
-        if command in self.completed_set:
-            res = self.agent.remove_item(self.completed_set[command])
+        key_to_remove = self.find_key_by_title(self.completed_set, command)
+
+        if key_to_remove is not None:
+            res = self.agent.remove_item(key_to_remove)
             logger.info("Command result: {}".format(res))
             self.main_menu('Ok')
         else:
             self.main_menu('Item not found.')
-
-    def tor_del_list(self, command):
-        self.mode = ''
-        if command == self.YES:
-            self.sender.sendMessage('Cleaning up...')
-
-            for id in self.completedlist:
-                logger.info('Removing item with id={}'.format(id))
-                self.agent.removeFromList(id)
-
-            self.sender.sendMessage('Done')
-
-        self.menu()
 
     def handle_command(self, command):
         logger.debug("command: {}, mode: {}".format(command, self.mode))
@@ -310,12 +271,6 @@ class Torrenter(telepot.helper.ChatHandler):
 
         elif command == self.MENU2:
             self.tor_show_list(True)
-
-        elif self.mode == self.MENU2_0:
-            self.show_full_list(command)
-
-        elif self.mode == self.MENU2_1:  # Del Torrents
-            self.tor_del_list(command)
 
         elif command == self.MENU4:
             self.tor_ask_for_link()
