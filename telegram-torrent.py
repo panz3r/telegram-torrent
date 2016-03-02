@@ -81,7 +81,7 @@ class Torrenter(telepot.helper.ChatHandler):
             ret += 'Title: {title}\nStatus: {status}'.format(**item)
 
             if item['status'] == 'Downloading':
-                ret += ' ({progress}%)\n'.format(**item)
+                ret += ' ({progress})\n'.format(**item)
             else:
                 ret += ' ({ratio})\n'.format(**item)
 
@@ -262,6 +262,17 @@ class Torrenter(telepot.helper.ChatHandler):
         else:
             self.main_menu('Item not found.')
 
+    def auto_manage_torrent_links(self, message):
+        logger.debug('Detecting if the message is a Torrent link...')
+        if message.startswith('magnet:') or message.endswith('.torrent'):
+            logger.debug('Message is a Torrent link and will be auto-managed.')
+            self.mode = self.MENU4
+            self.tor_add_from_link(message)
+            return True
+
+        logger.debug('Message is not a Torrent link.')
+        return False
+
     def handle_command(self, command):
         logger.debug("command: {}, mode: {}".format(command, self.mode))
         self.sender.sendChatAction('typing')
@@ -299,7 +310,7 @@ class Torrenter(telepot.helper.ChatHandler):
         elif self.mode == self.MENU7:
             self.tor_remove_item(command)
 
-        else:
+        elif not self.auto_manage_torrent_links(command):
             self.menu()
 
     def on_message(self, msg):
